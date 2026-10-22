@@ -111,6 +111,18 @@ function resolveBaseUrl(env: Env, request: Request): string {
   return (env.PUBLIC_BASE_URL || new URL(request.url).origin).replace(/\/+$/, '');
 }
 
+/**
+ * 回调诊断：只记录判断问题所需的非身份字段（事件类型、验签结果、解析出的 JM 号、回复结果），
+ * 不记录消息原文，也不记录 openid。
+ */
+async function recordCallback(env: Env, trace: Record<string, unknown>): Promise<void> {
+  try {
+    await env.CACHE.put('state/last-callback.json', JSON.stringify({ ...trace, at: new Date().toISOString() }));
+  } catch {
+    // 诊断本身不该影响收消息
+  }
+}
+
 async function handleQqEvent(env: Env, event: QqMessageEvent, baseUrl: string): Promise<string> {
   const albumId = parseAlbumId(event.content ?? '');
   if (!albumId) return await reply(env, event, '用法：直接发一个禁漫 JM 号，例如 350234');
@@ -169,13 +181,18 @@ export default {
 
         const body = await request.text();
         const payload = JSON.parse(body) as { op?: number; t?: string; d?: QqMessageEvent };
+        const trace: Record<string, unknown> = { op: payload.op ?? null, event: payload.t ?? null };
 
         const signature = request.headers.get('x-signature-ed25519') ?? '';
         const timestamp = request.headers.get('x-signature-timestamp') ?? '';
-        if (!signature) return new Response('missing signature', { status: 401 });
+        if (!signature) {
+          await recordCallback(env, { ...trace, outcome: '缺少 x-signature-ed25519 头，已拒绝' });
+          return new Response('missing signature', { status: 401 });
+        }
 
         if (payload.op === 13) {
           const d = (payload.d ?? {}) as { plain_token?: string; event_ts?: string };
+          await recordCallback(env, { ...trace, outcome: '回调地址校验，已签名应答' });
           return json({
             plain_token: d.plain_token,
             signature: await signCallback(env, d.event_ts ?? '', d.plain_token ?? ''),
@@ -183,11 +200,26 @@ export default {
         }
 
         if (!(await verifyCallback(env, signature, timestamp, body))) {
+          await recordCallback(env, {
+            ...trace,
+            outcome: '验签失败已拒绝 —— 若这是真实事件，说明事件签名约定与平台不一致',
+          });
           return new Response('invalid signature', { status: 401 });
         }
 
-        ctx.waitUntil(handleQqEvent(env, payload.d ?? {}, resolveBaseUrl(env, request)).then((log) => console.log(log)));
+        const event = payload.d ?? {};
+        trace.album_id = parseAlbumId(event.content ?? '');
+        ctx.waitUntil(
+          handleQqEvent(env, event, resolveBaseUrl(env, request))
+            .then((result) => recordCallback(env, { ...trace, outcome: String(result).slice(0, 200) }))
+            .catch((e) => recordCallback(env, { ...trace, outcome: `处理异常: ${reason(e)}`.slice(0, 200) })),
+        );
         return json({ op: 12 });
+      }
+
+      if (seg[0] === 'qq' && seg[1] === 'last') {
+        const last = await readJson<Record<string, unknown>>(env, 'state/last-callback.json');
+        return json(last ?? { note: '还没收到任何回调 —— 说明 QQ 侧没有往这个地址推事件' });
       }
 
       if (seg[0] === 'p' && seg.length === 2 && ID.test(seg[1])) {
