@@ -35,7 +35,10 @@ async function hmac(secret: string, message: string): Promise<string> {
 }
 
 async function linkSig(env: Env, albumId: string, exp: string): Promise<string> {
-  return hmac(env.LINK_SECRET ?? '', `${albumId}:${exp}`);
+  if (!env.LINK_SECRET) {
+    throw new Error('未配置 LINK_SECRET：请在 Worker 的 Settings → Variables and Secrets 里以「密钥」类型添加（明文变量会被 wrangler 部署清空）');
+  }
+  return hmac(env.LINK_SECRET, `${albumId}:${exp}`);
 }
 
 async function previewLink(env: Env, albumId: string, baseUrl: string): Promise<string> {
