@@ -31,8 +31,8 @@ function apiHeaders(ts: number, secret = TOKEN_SECRET): Record<string, string> {
   };
 }
 
-function pick<T>(list: T[]): T {
-  return list[Math.floor(Math.random() * list.length)];
+function reason(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }
 
 async function settingCookie(): Promise<string> {
@@ -136,7 +136,6 @@ export async function fetchChapter(meta: AlbumMeta, photoId: string): Promise<Ch
     index: self ? Number(self.sort) : (known?.index ?? 1),
     title: known?.title || String(data.name ?? ''),
     images: ((data.images ?? []) as unknown[]).map(String),
-    domain: pick(IMAGE_HOSTS),
   };
 }
 
@@ -152,20 +151,38 @@ export function imageNum(scrambleId: string, photoId: string, fileName: string):
   return (hex.charCodeAt(hex.length - 1) % x) * 2 + 2;
 }
 
-export function imageUrl(domain: string, photoId: string, fileName: string): string {
+function imageUrl(domain: string, photoId: string, fileName: string): string {
   return `https://${domain}/media/photos/${photoId}/${fileName}`;
 }
 
-export async function fetchImageBytes(url: string): Promise<{ bytes: ArrayBuffer; contentType: string }> {
-  const resp = await fetch(url, {
-    headers: {
-      'user-agent': UA,
-      referer: 'https://18comic.vip/',
-      'x-requested-with': 'com.JMComic3.app',
-    },
-  });
-  if (!resp.ok || resp.status !== 200) throw new Error(`图片获取失败 ${resp.status}: ${url}`);
-  const bytes = await resp.arrayBuffer();
-  if (bytes.byteLength === 0) throw new Error(`图片响应为空: ${url}`);
-  return { bytes, contentType: resp.headers.get('content-type') ?? 'image/jpeg' };
+export async function fetchImageBytes(photoId: string, fileName: string): Promise<{ bytes: ArrayBuffer; contentType: string }> {
+  const hosts = [...IMAGE_HOSTS].sort(() => Math.random() - 0.5);
+  const fails: string[] = [];
+
+  // 单个图片域名可能整段不可用，逐个试到成功为止
+  for (const host of hosts) {
+    try {
+      const resp = await fetch(imageUrl(host, photoId, fileName), {
+        headers: {
+          'user-agent': UA,
+          referer: 'https://18comic.vip/',
+          'x-requested-with': 'com.JMComic3.app',
+        },
+      });
+      if (resp.status !== 200) {
+        fails.push(`${host}=${resp.status}`);
+        continue;
+      }
+      const bytes = await resp.arrayBuffer();
+      if (bytes.byteLength === 0) {
+        fails.push(`${host}=空响应`);
+        continue;
+      }
+      return { bytes, contentType: resp.headers.get('content-type') ?? 'image/webp' };
+    } catch (e) {
+      fails.push(`${host}:${reason(e)}`);
+    }
+  }
+
+  throw new Error(`图片获取失败 ${photoId}/${fileName} → ${fails.join(' | ')}`);
 }

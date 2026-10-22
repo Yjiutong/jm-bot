@@ -1,4 +1,4 @@
-import { fetchAlbum, fetchChapter, fetchImageBytes, imageNum, imageUrl } from './jm';
+import { fetchAlbum, fetchChapter, fetchImageBytes, imageNum } from './jm';
 import { renderReader } from './reader';
 import { reply, signCallback, verifyCallback, type QqMessageEvent } from './qq';
 import { readJson, type AlbumMeta, type Chapter, type Env } from './env';
@@ -73,7 +73,7 @@ async function ensureChapter(env: Env, meta: AlbumMeta, photoId: string): Promis
   return chapter;
 }
 
-async function serveImage(env: Env, key: string, source: string): Promise<Response> {
+async function serveImage(env: Env, key: string, photoId: string, fileName: string): Promise<Response> {
   const cached = await env.CACHE.get(key);
   if (cached) {
     return new Response(cached.body, {
@@ -84,7 +84,7 @@ async function serveImage(env: Env, key: string, source: string): Promise<Respon
     });
   }
 
-  const image = await fetchImageBytes(source);
+  const image = await fetchImageBytes(photoId, fileName);
   await env.CACHE.put(key, image.bytes, { httpMetadata: { contentType: image.contentType } });
   return new Response(image.bytes, {
     headers: { 'content-type': image.contentType, 'cache-control': 'private, max-age=3600' },
@@ -227,11 +227,7 @@ export default {
         const chapter = await ensureChapter(env, meta, photoId);
         if (!chapter.images.includes(fileName)) return new Response('not found', { status: 404 });
 
-        return serveImage(
-          env,
-          `albums/${albumId}/img/${photoId}/${fileName}`,
-          imageUrl(chapter.domain, photoId, fileName),
-        );
+        return await serveImage(env, `albums/${albumId}/img/${photoId}/${fileName}`, photoId, fileName);
       }
 
       return new Response('not found', { status: 404 });

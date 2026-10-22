@@ -36,7 +36,6 @@ export interface Chapter {
   index: number;
   title: string;
   images: string[];
-  domain: string;
 }
 
 /** 当前 workers-types 的 R2 get 没有 json 泛型重载，统一走这里。 */
