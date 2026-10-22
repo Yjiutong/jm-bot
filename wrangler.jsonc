@@ -1,0 +1,28 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "jm-bot",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+
+  "observability": {
+    "enabled": true,
+    "logs": { "enabled": true }
+  },
+
+  "r2_buckets": [
+    { "binding": "CACHE", "bucket_name": "jm-bot-cache" }
+  ],
+
+  // 自定义域名路由：把 pattern 换成你的子域名后取消注释（免费计划支持自定义域名）。
+  // QQ 回调地址和阅读链接都必须走这个域名，不能用 *.workers.dev。
+  // "routes": [
+  //   { "pattern": "jm.example.com", "custom_domain": true }
+  // ],
+
+  "vars": {
+    "QQ_API_BASE": "https://api.bot.qq.com",
+    "QQ_TOKEN_URL": "https://bots.qq.com/app/getAppAccessToken",
+    "PREVIEW_HOURS": "24",
+    "PUBLIC_BASE_URL": "https://REPLACE-ME.example.com"
+  }
+}

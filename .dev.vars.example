@@ -1,0 +1,5 @@
+# wrangler dev 本地变量；线上用 wrangler secret put
+QQ_APP_ID=1234567890
+QQ_CLIENT_SECRET=replace-me
+LINK_SECRET=随便一串长随机字符
+PUBLIC_BASE_URL=http://localhost:8787
