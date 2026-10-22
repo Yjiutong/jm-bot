@@ -9,12 +9,15 @@
     "logs": { "enabled": true }
   },
 
-  // 这个文件只服务两件事：本地 npm run dev，以及坚持用 wrangler 部署的人。
-  // 变量和密钥一律在 Cloudflare 后台配置，代码里都有默认值，仓库不需要再改。
-  //
-  // 注意：wrangler 配置文件是配置的权威源。用 wrangler deploy 会把后台手动加的
-  // 自定义域名路由冲掉，所以本项目「部署一次之后就只在后台操作」。
+  // 只声明「与使用者无关」的资源绑定，仓库保持通用。
+  // R2 绑定由 wrangler 建立，但桶本身要先在后台建好，名字必须是 jm-bot-cache。
   "r2_buckets": [
     { "binding": "CACHE", "bucket_name": "jm-bot-cache" }
   ]
+
+  // 域名刻意不写在这里。Workers Builds 的 Deploy command 用：
+  //   npx wrangler deploy --domain "$CUSTOM_DOMAIN"
+  // 域名作为 build variable 存在 Cloudflare 侧，不进仓库。
+  // 若你改用本地部署，也可以直接写 routes：
+  //   "routes": [ { "pattern": "jm.example.com", "custom_domain": true } ]
 }
