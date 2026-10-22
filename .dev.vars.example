@@ -1,5 +1,9 @@
-# wrangler dev 本地变量；线上用 wrangler secret put
+# 只给本地 npm run dev 用；线上全部在 Cloudflare 后台配置
 QQ_APP_ID=1234567890
 QQ_CLIENT_SECRET=replace-me
 LINK_SECRET=随便一串长随机字符
-PUBLIC_BASE_URL=http://localhost:8787
+
+# 可选。不设就用请求自身的域名，本地开发时链接会指向 localhost:8787
+# PUBLIC_BASE_URL=https://jm.example.com
+# 可选。试读链接有效小时数，默认 24
+# PREVIEW_HOURS=24

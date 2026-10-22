@@ -3,12 +3,12 @@ export interface Env {
 
   QQ_APP_ID: string;
   QQ_CLIENT_SECRET: string;
-  QQ_API_BASE: string;
-  QQ_TOKEN_URL: string;
+  QQ_API_BASE?: string;
+  QQ_TOKEN_URL?: string;
 
   LINK_SECRET: string;
-  PUBLIC_BASE_URL: string;
-  PREVIEW_HOURS: string;
+  PUBLIC_BASE_URL?: string;
+  PREVIEW_HOURS?: string;
 }
 
 export interface AlbumEpisode {

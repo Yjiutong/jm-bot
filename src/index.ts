@@ -5,6 +5,7 @@ import { readJson, type AlbumMeta, type Chapter, type Env } from './env';
 
 const ID = /^\d{4,12}$/;
 const NAME = /^[\w.-]+\.(jpg|jpeg|png|gif|webp)$/i;
+const DEFAULT_PREVIEW_HOURS = '24';
 
 function reason(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -18,7 +19,7 @@ function json(data: unknown, status = 200): Response {
 }
 
 function previewHours(env: Env): number {
-  return Math.max(1, Number(env.PREVIEW_HOURS ?? '24'));
+  return Math.max(1, Number(env.PREVIEW_HOURS ?? DEFAULT_PREVIEW_HOURS));
 }
 
 async function hmac(secret: string, message: string): Promise<string> {
@@ -37,11 +38,10 @@ async function linkSig(env: Env, albumId: string, exp: string): Promise<string> 
   return hmac(env.LINK_SECRET ?? '', `${albumId}:${exp}`);
 }
 
-async function previewLink(env: Env, albumId: string): Promise<string> {
+async function previewLink(env: Env, albumId: string, baseUrl: string): Promise<string> {
   const exp = Math.floor(Date.now() / 1000) + previewHours(env) * 3600;
   const sig = await linkSig(env, albumId, String(exp));
-  const base = (env.PUBLIC_BASE_URL ?? '').replace(/\/+$/, '');
-  return `${base}/p/${albumId}?e=${exp}&s=${sig}`;
+  return `${baseUrl}/p/${albumId}?e=${exp}&s=${sig}`;
 }
 
 async function checkAccess(env: Env, albumId: string, params: URLSearchParams): Promise<string | null> {
@@ -100,13 +100,21 @@ function parseAlbumId(content: string): string {
   return /^\d{4,12}$/.test(cleaned) ? cleaned : '';
 }
 
-async function handleQqEvent(env: Env, event: QqMessageEvent): Promise<string> {
+/**
+ * 链接基址不需要单独配置：没设 PUBLIC_BASE_URL 时直接取回调请求自己的来源，
+ * 后台绑的是哪个域名就是哪个，省掉一次改配置。
+ */
+function resolveBaseUrl(env: Env, request: Request): string {
+  return (env.PUBLIC_BASE_URL || new URL(request.url).origin).replace(/\/+$/, '');
+}
+
+async function handleQqEvent(env: Env, event: QqMessageEvent, baseUrl: string): Promise<string> {
   const albumId = parseAlbumId(event.content ?? '');
   if (!albumId) return await reply(env, event, '用法：直接发一个禁漫 JM 号，例如 350234');
 
   try {
     const meta = await ensureMeta(env, albumId);
-    const link = await previewLink(env, meta.album_id);
+    const link = await previewLink(env, meta.album_id, baseUrl);
     const lines = [
       meta.title,
       `${meta.authors.join(' / ')}｜${meta.episodes.length} 话 ${meta.page_count} 页`,
@@ -175,7 +183,7 @@ export default {
           return new Response('invalid signature', { status: 401 });
         }
 
-        ctx.waitUntil(handleQqEvent(env, payload.d ?? {}).then((log) => console.log(log)));
+        ctx.waitUntil(handleQqEvent(env, payload.d ?? {}, resolveBaseUrl(env, request)).then((log) => console.log(log)));
         return json({ op: 12 });
       }
 

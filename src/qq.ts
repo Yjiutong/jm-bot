@@ -4,6 +4,9 @@ const PKCS8_ED25519 = Uint8Array.from([
   0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
 ]);
 
+const DEFAULT_API_BASE = 'https://api.bot.qq.com';
+const DEFAULT_TOKEN_URL = 'https://bots.qq.com/app/getAppAccessToken';
+
 let verifyKey: CryptoKey | null = null;
 
 function toHex(buffer: ArrayBuffer): string {
@@ -66,7 +69,7 @@ export async function accessToken(env: Env): Promise<string> {
   const cached = await readJson<{ token: string; expiresAt: number }>(env, key);
   if (cached?.token && cached.expiresAt - Date.now() > 60_000) return cached.token;
 
-  const resp = await fetch(env.QQ_TOKEN_URL, {
+  const resp = await fetch(env.QQ_TOKEN_URL || DEFAULT_TOKEN_URL, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ app_id: env.QQ_APP_ID, client_secret: env.QQ_CLIENT_SECRET }),
@@ -100,7 +103,7 @@ export async function reply(env: Env, event: QqMessageEvent, text: string): Prom
       : '';
   if (!target) return '事件里没有 group_openid / openid';
 
-  const resp = await fetch(`${env.QQ_API_BASE}${target}`, {
+  const resp = await fetch(`${env.QQ_API_BASE || DEFAULT_API_BASE}${target}`, {
     method: 'POST',
     headers: {
       authorization: `QQBot ${await accessToken(env)}`,
