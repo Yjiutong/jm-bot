@@ -90,18 +90,21 @@ export interface QqMessageEvent {
   content?: string;
   group_openid?: string;
   openid?: string;
+  /** 单聊事件（C2C_MESSAGE_CREATE）的用户标识在 user.openid 里，不在顶层 */
+  user?: { id?: string; openid?: string };
 }
 
 /** 群聊被动回复窗口只有 5 分钟、5 次，超时或超频会拿到 40034128。 */
 export async function reply(env: Env, event: QqMessageEvent, text: string): Promise<string> {
   if (!event.id) return '事件缺少 id，无法被动回复';
 
+  const openId = event.user?.openid || event.openid || '';
   const target = event.group_openid
     ? `/v2/groups/${event.group_openid}/messages`
-    : event.openid
-      ? `/v2/users/${event.openid}/messages`
+    : openId
+      ? `/v2/users/${openId}/messages`
       : '';
-  if (!target) return '事件里没有 group_openid / openid';
+  if (!target) return '事件里没有 group_openid / user.openid';
 
   const resp = await fetch(`${env.QQ_API_BASE || DEFAULT_API_BASE}${target}`, {
     method: 'POST',
