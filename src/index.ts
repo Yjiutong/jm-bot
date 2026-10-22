@@ -130,13 +130,18 @@ async function handleQqEvent(env: Env, event: QqMessageEvent, baseUrl: string): 
   try {
     const meta = await ensureMeta(env, albumId);
     const link = await previewLink(env, meta.album_id, baseUrl);
-    const lines = [
+    const head = [
       meta.title,
       `${meta.authors.join(' / ')}｜${meta.episodes.length} 话 ${meta.page_count} 页`,
       meta.tags.length > 0 ? `标签 ${meta.tags.slice(0, 6).join(' ')}` : '',
-      link,
     ].filter(Boolean);
-    return await reply(env, event, lines.join('\n'));
+
+    const first = await reply(env, event, [...head, link].join('\n'));
+    if (first.startsWith('已回复')) return first;
+
+    // 带链接失败、去掉链接就成功 → 域名没进 QQ 的消息 URL 白名单
+    const retry = await reply(env, event, head.join('\n'));
+    return `${first} → 去掉链接重试: ${retry}`;
   } catch (e) {
     return await reply(env, event, `抓取失败：${reason(e)}`.slice(0, 400));
   }

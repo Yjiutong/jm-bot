@@ -110,10 +110,10 @@ export async function reply(env: Env, event: QqMessageEvent, text: string): Prom
       'content-type': 'application/json',
     },
     body: JSON.stringify({
-      msgtype: 0,
+      msg_type: 0,
       content: text.slice(0, 500),
       msg_id: event.id,
-      msg_seq: Date.now(),
+      msg_seq: 1,
     }),
   });
 
