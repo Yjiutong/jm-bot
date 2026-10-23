@@ -214,6 +214,8 @@ export default {
 
         const event = payload.d ?? {};
         trace.album_id = parseAlbumId(event.content ?? '');
+        // 只记录字段名，不记录任何取值，避免 openid / 消息原文进诊断
+        trace.fields = Object.keys(event).join(',');
         ctx.waitUntil(
           handleQqEvent(env, event, resolveBaseUrl(env, request))
             .then((result) => recordCallback(env, { ...trace, outcome: String(result).slice(0, 200) }))
