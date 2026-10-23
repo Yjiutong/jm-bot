@@ -61,8 +61,6 @@ Workers & Pages → Create → **Continue with GitHub** → 按提示给 Cloudfl
 
 这样域名只存在于 Cloudflare 侧，仓库里不出现你的信息。
 
-> 这一步是我按「Deploy command 走 shell」推出来的，还没在你的账号上实测。如果部署日志显示 `--domain` 收到空值或报错，就把域名**直接写进 Deploy command**（`npx wrangler deploy --domain jm.你的域名.com`）—— 它仍然在 Cloudflare 后台，不进仓库。
-
 ### 5. 配 Worker 运行时密钥
 
 部署成功后，进入 Worker → **Settings → Variables and Secrets**（注意这和上面的 build 变量是两处），加三条 **Secret**：
