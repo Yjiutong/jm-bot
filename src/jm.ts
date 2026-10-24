@@ -98,6 +98,19 @@ async function fetchScrambleId(photoId: string): Promise<string> {
   return '220980';
 }
 
+/** 首页「最新」列表：空关键词的 /search 不返回数据，要走分类筛选接口。 */
+export async function fetchLatest(page = 1): Promise<{ album_id: string; title: string; author: string }[]> {
+  const data = await apiData(`/categories/filter?page=${page}&order=&c=0&o=mr`);
+  const content = (data.content ?? []) as { id?: string | number; name?: string; author?: string }[];
+  return content
+    .filter((item) => item.id !== undefined)
+    .map((item) => ({
+      album_id: String(item.id),
+      title: String(item.name ?? '').trim(),
+      author: String(item.author ?? '').trim(),
+    }));
+}
+
 export async function fetchAlbum(albumId: string): Promise<AlbumMeta> {
   const data = await apiData(`/album?id=${albumId}&lang=zh`);
   const series = (data.series ?? []) as { id: string; name?: string; sort: string }[];
@@ -153,6 +166,32 @@ export function imageNum(scrambleId: string, photoId: string, fileName: string):
 
 function imageUrl(domain: string, photoId: string, fileName: string): string {
   return `https://${domain}/media/photos/${photoId}/${fileName}`;
+}
+
+/** 封面走固定的 albums 路径，不需要额外接口；书架缩略图与阅读页共用这条。 */
+export async function coverBytes(albumId: string): Promise<{ bytes: ArrayBuffer; contentType: string }> {
+  const hosts = [...IMAGE_HOSTS].sort(() => Math.random() - 0.5);
+  const fails: string[] = [];
+  for (const host of hosts) {
+    try {
+      const resp = await fetch(`https://${host}/media/albums/${albumId}.jpg`, {
+        headers: { 'user-agent': UA, referer: 'https://18comic.vip/' },
+      });
+      if (resp.status !== 200) {
+        fails.push(`${host}=${resp.status}`);
+        continue;
+      }
+      const bytes = await resp.arrayBuffer();
+      if (bytes.byteLength === 0) {
+        fails.push(`${host}=空响应`);
+        continue;
+      }
+      return { bytes, contentType: resp.headers.get('content-type') ?? 'image/jpeg' };
+    } catch (e) {
+      fails.push(`${host}:${reason(e)}`);
+    }
+  }
+  throw new Error(`封面获取失败 ${albumId} → ${fails.join(' | ')}`);
 }
 
 export async function fetchImageBytes(photoId: string, fileName: string): Promise<{ bytes: ArrayBuffer; contentType: string }> {

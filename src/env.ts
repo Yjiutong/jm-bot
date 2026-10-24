@@ -9,6 +9,7 @@ export interface Env {
   LINK_SECRET: string;
   PUBLIC_BASE_URL?: string;
   PREVIEW_HOURS?: string;
+  DAILY_LIMIT?: string;
 }
 
 export interface AlbumEpisode {

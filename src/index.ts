@@ -1,11 +1,15 @@
-import { fetchAlbum, fetchChapter, fetchImageBytes, imageNum } from './jm';
+import { buildDaily, coverKey, coverSourcePath, dayKey, readDaily } from './daily';
+import { coverBytes, fetchAlbum, fetchChapter, fetchImageBytes, imageNum } from './jm';
 import { renderReader } from './reader';
+import { renderHome, renderShelf } from './shelf';
 import { reply, signCallback, verifyCallback, type QqMessageEvent } from './qq';
 import { readJson, type AlbumMeta, type Chapter, type Env } from './env';
 
 const ID = /^\d{4,12}$/;
 const NAME = /^[\w.-]+\.(jpg|jpeg|png|gif|webp)$/i;
-const DEFAULT_PREVIEW_HOURS = '24';
+const DATE = /^\d{4}-\d{2}-\d{2}$/;
+const DAILY_SCOPE = 'daily';
+const DAILY_KEYWORDS = new Set(['今日更新', '今天更新', '最新', 'daily']);
 
 function reason(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -18,42 +22,55 @@ function json(data: unknown, status = 200): Response {
   });
 }
 
+function html(body: string): Response {
+  return new Response(body, {
+    headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
+  });
+}
+
 function previewHours(env: Env): number {
-  return Math.max(1, Number(env.PREVIEW_HOURS ?? DEFAULT_PREVIEW_HOURS));
+  return Math.max(1, Number(env.PREVIEW_HOURS ?? '24'));
 }
 
-async function hmac(secret: string, message: string): Promise<string> {
-  const key = await crypto.subtle.importKey(
-    'raw',
-    new TextEncoder().encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign'],
-  );
-  const sig = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(message)));
-  return btoa(String.fromCharCode(...sig)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
+/** CryptoKey 每个隔离环境只导入一次：书架页一次要签二十多条链接，重复导入会吃掉 CPU 额度。 */
+let cachedKey: { secret: string; key: CryptoKey } | null = null;
 
-async function linkSig(env: Env, albumId: string, exp: string): Promise<string> {
+async function signKey(env: Env): Promise<CryptoKey> {
   if (!env.LINK_SECRET) {
     throw new Error('未配置 LINK_SECRET：请在 Worker 的 Settings → Variables and Secrets 里以「密钥」类型添加（明文变量会被 wrangler 部署清空）');
   }
-  return hmac(env.LINK_SECRET, `${albumId}:${exp}`);
+  if (cachedKey?.secret !== env.LINK_SECRET) {
+    cachedKey = {
+      secret: env.LINK_SECRET,
+      key: await crypto.subtle.importKey('raw', new TextEncoder().encode(env.LINK_SECRET), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']),
+    };
+  }
+  return cachedKey.key;
 }
 
-async function previewLink(env: Env, albumId: string, baseUrl: string): Promise<string> {
-  const exp = Math.floor(Date.now() / 1000) + previewHours(env) * 3600;
-  const sig = await linkSig(env, albumId, String(exp));
-  return `${baseUrl}/p/${albumId}?e=${exp}&s=${sig}`;
+async function ticket(env: Env, scope: string, exp: string): Promise<string> {
+  const sig = new Uint8Array(
+    await crypto.subtle.sign('HMAC', await signKey(env), new TextEncoder().encode(`${scope}:${exp}`)),
+  );
+  return btoa(String.fromCharCode(...sig)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-async function checkAccess(env: Env, albumId: string, params: URLSearchParams): Promise<string | null> {
+function expiring(env: Env): string {
+  return String(Math.floor(Date.now() / 1000) + previewHours(env) * 3600);
+}
+
+async function checkTicket(env: Env, scope: string, params: URLSearchParams): Promise<string | null> {
   const exp = params.get('e') ?? '';
   const sig = params.get('s') ?? '';
   if (!/^\d+$/.test(exp)) return '缺少过期参数';
   if (Number(exp) * 1000 < Date.now()) return '链接已过期';
-  if (sig !== (await linkSig(env, albumId, exp))) return '签名不匹配';
+  if (sig !== (await ticket(env, scope, exp))) return '签名不匹配';
   return null;
+}
+
+/** 返回 `e=..&s=..`（不含前导符号），由调用方决定拼 `?` 还是 `&`。 */
+function queryOf(params: URLSearchParams): string {
+  return `e=${encodeURIComponent(params.get('e') ?? '')}&s=${encodeURIComponent(params.get('s') ?? '')}`;
 }
 
 async function ensureMeta(env: Env, albumId: string): Promise<AlbumMeta> {
@@ -76,7 +93,7 @@ async function ensureChapter(env: Env, meta: AlbumMeta, photoId: string): Promis
   return chapter;
 }
 
-async function serveImage(env: Env, key: string, photoId: string, fileName: string): Promise<Response> {
+async function serveImage(env: Env, key: string, source: () => Promise<{ bytes: ArrayBuffer; contentType: string }>): Promise<Response> {
   const cached = await env.CACHE.get(key);
   if (cached) {
     return new Response(cached.body, {
@@ -87,7 +104,7 @@ async function serveImage(env: Env, key: string, photoId: string, fileName: stri
     });
   }
 
-  const image = await fetchImageBytes(photoId, fileName);
+  const image = await source();
   await env.CACHE.put(key, image.bytes, { httpMetadata: { contentType: image.contentType } });
   return new Response(image.bytes, {
     headers: { 'content-type': image.contentType, 'cache-control': 'private, max-age=3600' },
@@ -103,18 +120,10 @@ function parseAlbumId(content: string): string {
   return /^\d{4,12}$/.test(cleaned) ? cleaned : '';
 }
 
-/**
- * 链接基址不需要单独配置：没设 PUBLIC_BASE_URL 时直接取回调请求自己的来源，
- * 后台绑的是哪个域名就是哪个，省掉一次改配置。
- */
 function resolveBaseUrl(env: Env, request: Request): string {
   return (env.PUBLIC_BASE_URL || new URL(request.url).origin).replace(/\/+$/, '');
 }
 
-/**
- * 回调诊断：只记录判断问题所需的非身份字段（事件类型、验签结果、解析出的 JM 号、回复结果），
- * 不记录消息原文，也不记录 openid。
- */
 async function recordCallback(env: Env, trace: Record<string, unknown>): Promise<void> {
   try {
     await env.CACHE.put('state/last-callback.json', JSON.stringify({ ...trace, at: new Date().toISOString() }));
@@ -124,12 +133,24 @@ async function recordCallback(env: Env, trace: Record<string, unknown>): Promise
 }
 
 async function handleQqEvent(env: Env, event: QqMessageEvent, baseUrl: string): Promise<string> {
+  const content = (event.content ?? '').replace(/@[^\s]+/g, ' ').trim();
   const albumId = parseAlbumId(event.content ?? '');
-  if (!albumId) return await reply(env, event, '用法：直接发一个禁漫 JM 号，例如 350234');
+
+  if (!albumId && !DAILY_KEYWORDS.has(content)) {
+    return await reply(env, event, '用法：发一个禁漫 JM 号（例如 350234），或发「今日更新」看当天最新书架');
+  }
 
   try {
+    if (!albumId) {
+      const index = await readDaily(env);
+      const exp = expiring(env);
+      const link = `${baseUrl}/daily?e=${exp}&s=${await ticket(env, DAILY_SCOPE, exp)}`;
+      return await reply(env, event, `今日更新 ${index.items.length} 本\n${link}`);
+    }
+
     const meta = await ensureMeta(env, albumId);
-    const link = await previewLink(env, meta.album_id, baseUrl);
+    const exp = expiring(env);
+    const link = `${baseUrl}/p/${meta.album_id}?e=${exp}&s=${await ticket(env, meta.album_id, exp)}`;
     const head = [
       meta.title,
       `${meta.authors.join(' / ')}｜${meta.episodes.length} 话 ${meta.page_count} 页`,
@@ -152,9 +173,7 @@ async function cryptoSelfTest(env: Env): Promise<Response> {
   try {
     const sig = await signCallback(env, '1725442341', 'Arq0D5A61EgUu4OxUvOp');
     result.ed25519_sign = `ok (${sig.length} hex)`;
-    result.ed25519_verify = (await verifyCallback(env, sig, '1725442341', 'Arq0D5A61EgUu4OxUvOp'))
-      ? 'ok'
-      : 'FAILED';
+    result.ed25519_verify = (await verifyCallback(env, sig, '1725442341', 'Arq0D5A61EgUu4OxUvOp')) ? 'ok' : 'FAILED';
   } catch (e) {
     result.ed25519 = `FAILED: ${reason(e)}`;
   }
@@ -163,6 +182,12 @@ async function cryptoSelfTest(env: Env): Promise<Response> {
     result.r2 = (await env.CACHE.get('state/selftest.txt'))?.body ? 'ok' : 'read failed';
   } catch (e) {
     result.r2 = `FAILED: ${reason(e)}`;
+  }
+  try {
+    const index = await readDaily(env);
+    result.daily = `ok (${index.items.length} 本, ${index.date})`;
+  } catch (e) {
+    result.daily = `FAILED: ${reason(e)}`;
   }
   return json(result);
 }
@@ -174,9 +199,9 @@ export default {
 
     try {
       if (seg.length === 0) {
-        return new Response('jm-bot worker：/p/<JM号> 阅读页，/qq/callback 回调，/cryptotest 自检', {
-          headers: { 'content-type': 'text/plain; charset=utf-8' },
-        });
+        const index = await readDaily(env);
+        const exp = expiring(env);
+        return html(renderHome(`/daily?e=${exp}&s=${await ticket(env, DAILY_SCOPE, exp)}`, index.items.length, previewHours(env)));
       }
 
       if (seg[0] === 'cryptotest') return await cryptoSelfTest(env);
@@ -205,16 +230,12 @@ export default {
         }
 
         if (!(await verifyCallback(env, signature, timestamp, body))) {
-          await recordCallback(env, {
-            ...trace,
-            outcome: '验签失败已拒绝 —— 若这是真实事件，说明事件签名约定与平台不一致',
-          });
+          await recordCallback(env, { ...trace, outcome: '验签失败已拒绝 —— 若这是真实事件，说明事件签名约定与平台不一致' });
           return new Response('invalid signature', { status: 401 });
         }
 
         const event = payload.d ?? {};
         trace.album_id = parseAlbumId(event.content ?? '');
-        // 只记录字段名，不记录任何取值，避免 openid / 消息原文进诊断
         trace.fields = Object.keys(event).join(',');
         ctx.waitUntil(
           handleQqEvent(env, event, resolveBaseUrl(env, request))
@@ -229,32 +250,54 @@ export default {
         return json(last ?? { note: '还没收到任何回调 —— 说明 QQ 侧没有往这个地址推事件' });
       }
 
+      if (seg[0] === 'daily' && seg.length === 1) {
+        const denied = await checkTicket(env, DAILY_SCOPE, url.searchParams);
+        if (denied) return new Response(denied, { status: 403 });
+
+        const index = await readDaily(env);
+        const exp = url.searchParams.get('e') ?? '';
+        const entries = await Promise.all(
+          index.items.map(async (item) => ({
+            album_id: item.album_id,
+            title: item.title,
+            author: item.author,
+            href: `/p/${item.album_id}?e=${exp}&s=${await ticket(env, item.album_id, exp)}`,
+            cover: `${coverSourcePath(index.date, item.album_id)}?${queryOf(url.searchParams)}`,
+          })),
+        );
+        return html(renderShelf(index.date, index.built_at, entries, previewHours(env)));
+      }
+
+      if (seg[0] === 'dc' && seg.length === 3 && DATE.test(seg[1]) && ID.test(seg[2].replace(/\.jpg$/, '')) && seg[2].endsWith('.jpg')) {
+        const date = seg[1];
+        const albumId = seg[2].slice(0, -4);
+        if (date !== dayKey()) return new Response('书架已过期', { status: 410 });
+
+        const denied = await checkTicket(env, DAILY_SCOPE, url.searchParams);
+        if (denied) return new Response(denied, { status: 403 });
+
+        return await serveImage(env, coverKey(date, albumId), () => coverBytes(albumId));
+      }
+
       if (seg[0] === 'p' && seg.length === 2 && ID.test(seg[1])) {
         const albumId = seg[1];
-        const denied = await checkAccess(env, albumId, url.searchParams);
+        const denied = await checkTicket(env, albumId, url.searchParams);
         if (denied) return new Response(denied, { status: 403 });
 
         const meta = await ensureMeta(env, albumId);
         const index = Math.min(Math.max(Number(url.searchParams.get('ep') ?? '0') || 0, 0), meta.episodes.length - 1);
-        const episode = meta.episodes[index];
-        const chapter = await ensureChapter(env, meta, episode.photo_id);
-        const query = url.searchParams;
-
+        const chapter = await ensureChapter(env, meta, meta.episodes[index].photo_id);
         const nums = chapter.images.map((name) =>
-          name.toLowerCase().endsWith('.gif')
-            ? 0
-            : imageNum(meta.scramble_id, chapter.photo_id, stripSuffix(name)) || 0,
+          name.toLowerCase().endsWith('.gif') ? 0 : imageNum(meta.scramble_id, chapter.photo_id, stripSuffix(name)) || 0,
         );
 
-        return new Response(
+        return html(
           renderReader(meta, chapter, {
             chapterIndex: index,
             nums,
-            exp: query.get('e') ?? '',
-            sig: query.get('s') ?? '',
+            query: queryOf(url.searchParams),
             ttlHours: previewHours(env),
           }),
-          { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } },
         );
       }
 
@@ -262,19 +305,27 @@ export default {
         const albumId = seg[1];
         const photoId = seg[2];
         const fileName = decodeURIComponent(seg[3]);
-        const denied = await checkAccess(env, albumId, url.searchParams);
+        const denied = await checkTicket(env, albumId, url.searchParams);
         if (denied) return new Response(denied, { status: 403 });
 
         const meta = await ensureMeta(env, albumId);
         const chapter = await ensureChapter(env, meta, photoId);
         if (!chapter.images.includes(fileName)) return new Response('not found', { status: 404 });
 
-        return await serveImage(env, `albums/${albumId}/img/${photoId}/${fileName}`, photoId, fileName);
+        return await serveImage(env, `albums/${albumId}/img/${photoId}/${fileName}`, () => fetchImageBytes(photoId, fileName));
       }
 
       return new Response('not found', { status: 404 });
     } catch (e) {
       return new Response(`请求失败: ${reason(e)}`, { status: 502 });
     }
+  },
+
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(
+      buildDaily(env)
+        .then((index) => console.log(`每日书架 ${index.date}：${index.items.length} 本`))
+        .catch((e) => console.error('每日书架构建失败:', reason(e))),
+    );
   },
 };

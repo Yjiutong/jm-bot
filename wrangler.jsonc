@@ -13,7 +13,13 @@
   // R2 绑定由 wrangler 建立，但桶本身要先在后台建好，名字必须是 jm-bot-cache。
   "r2_buckets": [
     { "binding": "CACHE", "bucket_name": "jm-bot-cache" }
-  ]
+  ],
+
+  // 每天重建书架：UTC 23:00 = 北京 07:00，UTC 11:00 = 北京 19:00。
+  // 没等到 cron 也没关系 —— 第一次访问 /daily 会自动补建当天的。
+  "triggers": {
+    "crons": ["0 23 * * *", "0 11 * * *"]
+  }
 
   // 域名刻意不写在这里。Workers Builds 的 Deploy command 用：
   //   npx wrangler deploy --domain "$CUSTOM_DOMAIN"
