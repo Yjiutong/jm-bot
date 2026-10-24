@@ -46,7 +46,15 @@ export function renderHome(dailyHref: string, count: number, hours: number): str
   return doc('禁漫试读', body);
 }
 
-export function renderShelf(date: string, builtAt: number, entries: ShelfEntry[], hours: number): string {
+export interface ShelfTab {
+  label: string;
+  date: string;
+  href: string;
+  current: boolean;
+}
+
+export function renderShelf(date: string, entries: ShelfEntry[], hours: number, tabs: ShelfTab[]): string {
+  const current = tabs.find((tab) => tab.current);
   const rows = entries
     .map(
       (item, i) => `<li>
@@ -67,11 +75,10 @@ export function renderShelf(date: string, builtAt: number, entries: ShelfEntry[]
 <div class="ed-body"><main class="ed-wrap">
   <section class="ed-masthead">
     <p class="ed-kicker">Daily Shelf · ${esc(date)}</p>
-    <h1><span>今日更新</span><em>${entries.length} 本</em></h1>
-    <p class="ed-lead">按源站更新时间倒序。列表每天重建，昨天的条目会自动清除；单本阅读链接约 ${hours} 小时后失效。</p>
+    <h1><span>${esc(current?.label ?? '今日更新')}</span><em>${entries.length} 本</em></h1>
+    <p class="ed-lead">按源站更新时间倒序。书架每天重建一次，历史书架保留 ${tabs.length} 天（由 R2 生命周期规则清除）；单本阅读链接约 ${hours} 小时后失效。</p>
     <div class="ed-facts">
-      <div><b>${esc(date)}</b><span>榜单日期</span></div>
-      <div><b>${new Date(builtAt).toLocaleString('zh-CN', { hour12: false })}</b><span>抓取时间</span></div>
+${tabs.map((tab) => `      <div><b><a href="${tab.href}"${tab.current ? ' style="color:var(--accent)"' : ''}>${esc(tab.label)}</a></b><span>${esc(tab.date)}</span></div>`).join('\n')}
     </div>
   </section>
   <section class="ed-section">
@@ -83,5 +90,5 @@ ${rows}
 </main>
 <footer class="ed-foot">© 玖桐 · 托管于 Cloudflare Workers + R2</footer>
 </div>`;
-  return doc(`今日更新 · ${date}`, body);
+  return doc(`${current?.label ?? '更新书架'} · ${date}`, body);
 }

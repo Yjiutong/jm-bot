@@ -1,4 +1,4 @@
-import { buildDaily, coverKey, coverSourcePath, dayKey, readDaily } from './daily';
+import { buildDaily, coverKey, coverSourcePath, dayKey, isQueryDay, readDaily, SHELF_WINDOW_DAYS } from './daily';
 import { coverBytes, fetchAlbum, fetchChapter, fetchImageBytes, imageNum } from './jm';
 import { renderReader } from './reader';
 import { renderHome, renderShelf } from './shelf';
@@ -8,8 +8,16 @@ import { readJson, type AlbumMeta, type Chapter, type Env } from './env';
 const ID = /^\d{4,12}$/;
 const NAME = /^[\w.-]+\.(jpg|jpeg|png|gif|webp)$/i;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
-const DAILY_SCOPE = 'daily';
-const DAILY_KEYWORDS = new Set(['今日更新', '今天更新', '最新', 'daily']);
+const DAILY_KEYWORDS = new Map([
+  ['今日更新', 0],
+  ['今天更新', 0],
+  ['最新', 0],
+  ['昨日更新', 1],
+  ['昨天更新', 1],
+  ['前日更新', 2],
+  ['前天更新', 2],
+]);
+const SHELF_LABELS = ['今日更新', '昨日更新', '前日更新'];
 
 function reason(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -71,6 +79,25 @@ async function checkTicket(env: Env, scope: string, params: URLSearchParams): Pr
 /** 返回 `e=..&s=..`（不含前导符号），由调用方决定拼 `?` 还是 `&`。 */
 function queryOf(params: URLSearchParams): string {
   return `e=${encodeURIComponent(params.get('e') ?? '')}&s=${encodeURIComponent(params.get('s') ?? '')}`;
+}
+
+/** 书架票据按日期分档，今天的票不能拿去访问昨天的书架。 */
+function shelfScope(date: string): string {
+  return `daily:${date}`;
+}
+
+async function shelfLink(env: Env, date: string, base = ''): Promise<string> {
+  const exp = expiring(env);
+  return `${base}/daily/${date}?e=${exp}&s=${await ticket(env, shelfScope(date), exp)}`;
+}
+
+async function shelfTabs(env: Env, current: string): Promise<{ label: string; date: string; href: string; current: boolean }[]> {
+  const tabs = [];
+  for (let offset = 0; offset < SHELF_WINDOW_DAYS; offset++) {
+    const date = dayKey(offset);
+    tabs.push({ label: SHELF_LABELS[offset] ?? date, date, href: await shelfLink(env, date), current: date === current });
+  }
+  return tabs;
 }
 
 async function ensureMeta(env: Env, albumId: string): Promise<AlbumMeta> {
@@ -135,17 +162,19 @@ async function recordCallback(env: Env, trace: Record<string, unknown>): Promise
 async function handleQqEvent(env: Env, event: QqMessageEvent, baseUrl: string): Promise<string> {
   const content = (event.content ?? '').replace(/@[^\s]+/g, ' ').trim();
   const albumId = parseAlbumId(event.content ?? '');
+  const dayOffset = DAILY_KEYWORDS.get(content);
 
-  if (!albumId && !DAILY_KEYWORDS.has(content)) {
-    return await reply(env, event, '用法：发一个禁漫 JM 号（例如 350234），或发「今日更新」看当天最新书架');
+  if (!albumId && dayOffset === undefined) {
+    return await reply(env, event, '用法：发一个禁漫 JM 号（例如 350234），或发「今日更新」「昨日更新」「前日更新」看书架');
   }
 
   try {
     if (!albumId) {
-      const index = await readDaily(env);
-      const exp = expiring(env);
-      const link = `${baseUrl}/daily?e=${exp}&s=${await ticket(env, DAILY_SCOPE, exp)}`;
-      return await reply(env, event, `今日更新 ${index.items.length} 本\n${link}`);
+      const label = SHELF_LABELS[dayOffset ?? 0] ?? '更新书架';
+      const date = dayKey(dayOffset ?? 0);
+      const index = await readDaily(env, date);
+      if (!index) return await reply(env, event, `${label}还没有生成（${date}）`);
+      return await reply(env, event, `${label} ${index.items.length} 本 · ${date}\n${await shelfLink(env, date, baseUrl)}`);
     }
 
     const meta = await ensureMeta(env, albumId);
@@ -185,7 +214,7 @@ async function cryptoSelfTest(env: Env): Promise<Response> {
   }
   try {
     const index = await readDaily(env);
-    result.daily = `ok (${index.items.length} 本, ${index.date})`;
+    result.daily = index ? `ok (${index.items.length} 本, ${index.date})` : 'empty（今天还没抓到数据）';
   } catch (e) {
     result.daily = `FAILED: ${reason(e)}`;
   }
@@ -200,8 +229,7 @@ export default {
     try {
       if (seg.length === 0) {
         const index = await readDaily(env);
-        const exp = expiring(env);
-        return html(renderHome(`/daily?e=${exp}&s=${await ticket(env, DAILY_SCOPE, exp)}`, index.items.length, previewHours(env)));
+        return html(renderHome(await shelfLink(env, dayKey()), index?.items.length ?? 0, previewHours(env)));
       }
 
       if (seg[0] === 'cryptotest') return await cryptoSelfTest(env);
@@ -250,11 +278,16 @@ export default {
         return json(last ?? { note: '还没收到任何回调 —— 说明 QQ 侧没有往这个地址推事件' });
       }
 
-      if (seg[0] === 'daily' && seg.length === 1) {
-        const denied = await checkTicket(env, DAILY_SCOPE, url.searchParams);
+      if (seg[0] === 'daily' && (seg.length === 1 || (seg.length === 2 && DATE.test(seg[1])))) {
+        const date = seg.length === 2 ? seg[1] : dayKey();
+        if (!isQueryDay(date)) return new Response(`只能查询最近 ${SHELF_WINDOW_DAYS} 天的书架`, { status: 410 });
+
+        const denied = await checkTicket(env, shelfScope(date), url.searchParams);
         if (denied) return new Response(denied, { status: 403 });
 
-        const index = await readDaily(env);
+        const index = await readDaily(env, date);
+        if (!index) return new Response(`那天的书架不存在（${date}）：当天没生成，或已超过保留期`, { status: 404 });
+
         const exp = url.searchParams.get('e') ?? '';
         const entries = await Promise.all(
           index.items.map(async (item) => ({
@@ -265,15 +298,15 @@ export default {
             cover: `${coverSourcePath(index.date, item.album_id)}?${queryOf(url.searchParams)}`,
           })),
         );
-        return html(renderShelf(index.date, index.built_at, entries, previewHours(env)));
+        return html(renderShelf(index.date, entries, previewHours(env), await shelfTabs(env, index.date)));
       }
 
       if (seg[0] === 'dc' && seg.length === 3 && DATE.test(seg[1]) && ID.test(seg[2].replace(/\.jpg$/, '')) && seg[2].endsWith('.jpg')) {
         const date = seg[1];
         const albumId = seg[2].slice(0, -4);
-        if (date !== dayKey()) return new Response('书架已过期', { status: 410 });
+        if (!isQueryDay(date)) return new Response('书架已过期', { status: 410 });
 
-        const denied = await checkTicket(env, DAILY_SCOPE, url.searchParams);
+        const denied = await checkTicket(env, shelfScope(date), url.searchParams);
         if (denied) return new Response(denied, { status: 403 });
 
         return await serveImage(env, coverKey(date, albumId), () => coverBytes(albumId));

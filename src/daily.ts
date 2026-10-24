@@ -15,6 +15,9 @@ export interface DailyIndex {
 
 const ZONE = 'Asia/Shanghai';
 
+/** 可查询的历史天数，必须与 R2 桶上 `daily/` 前缀的生命周期规则保持一致。 */
+export const SHELF_WINDOW_DAYS = 3;
+
 /** 「当天」按北京时间算，和读者的作息一致，而不是 UTC。 */
 export function dayKey(offsetDays = 0): string {
   const parts = new Intl.DateTimeFormat('en-CA', {
@@ -25,6 +28,14 @@ export function dayKey(offsetDays = 0): string {
   }).formatToParts(new Date(Date.now() - offsetDays * 86_400_000));
   const get = (type: string) => parts.find((p) => p.type === type)?.value ?? '00';
   return `${get('year')}-${get('month')}-${get('day')}`;
+}
+
+/** 只允许查询窗口内的日期，避免拿任意前缀去翻历史对象。 */
+export function isQueryDay(date: string): boolean {
+  for (let offset = 0; offset < SHELF_WINDOW_DAYS; offset++) {
+    if (dayKey(offset) === date) return true;
+  }
+  return false;
 }
 
 function dailyLimit(env: Env): number {
@@ -43,21 +54,10 @@ export function coverSourcePath(date: string, albumId: string): string {
   return `/dc/${date}/${albumId}.jpg`;
 }
 
-async function purgeDate(env: Env, date: string): Promise<number> {
-  let removed = 0;
-  let cursor: string | undefined;
-  do {
-    const listed = await env.CACHE.list({ prefix: `daily/${date}/`, cursor });
-    if (listed.objects.length > 0) {
-      removed += listed.objects.length;
-      await Promise.all(listed.objects.map((object) => env.CACHE.delete(object.key)));
-    }
-    cursor = listed.truncated ? listed.cursor : undefined;
-  } while (cursor);
-  return removed;
-}
-
-/** 抓今天的最新列表；写入后顺手清掉昨天的目录，实现「有效期仅当天」。 */
+/**
+ * 抓今天的最新列表。过期交给 R2 桶上 `daily/` 前缀的生命周期规则处理 ——
+ * 代码不再主动删昨日，否则「昨日更新 / 前日更新」就没数据可查了。
+ */
 export async function buildDaily(env: Env): Promise<DailyIndex> {
   const date = dayKey();
   const limit = dailyLimit(env);
@@ -79,13 +79,13 @@ export async function buildDaily(env: Env): Promise<DailyIndex> {
   await env.CACHE.put(indexKey(date), JSON.stringify(index), {
     httpMetadata: { contentType: 'application/json' },
   });
-  await purgeDate(env, dayKey(1));
   return index;
 }
 
-export async function readDaily(env: Env): Promise<DailyIndex> {
-  const date = dayKey();
+/** 只有今天允许在缺数据时现抓重建；历史日期抓不回来，直接返回 null。 */
+export async function readDaily(env: Env, date = dayKey()): Promise<DailyIndex | null> {
   const cached = await readJson<DailyIndex>(env, indexKey(date));
   if (cached && cached.date === date && cached.items?.length > 0) return cached;
+  if (date !== dayKey()) return null;
   return buildDaily(env);
 }
